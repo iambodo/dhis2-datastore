@@ -1,0 +1,289 @@
+---
+title: "Action Item responses"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, message=TRUE, warning=FALSE, paged.print=FALSE, fig.width = 7)
+options(encoding = "UTF-8")
+
+##Important!! Enter credential information. Include last "/" of the baseurl
+##ENTER BASE URL, USERNAME, PASSWORD
+baseurl<-"https://hrhr.dhis2.org/dhis/"
+username<-"brian"
+password<-""
+
+
+##Load required packages
+required_packages<-c("dplyr","stringr","lubridate","httr","assertthat","readr","stats","DT","ggplot2","utils","datasets","methods","base","knitr","reshape2")      
+
+is_installed <- function(mypkg) is.element(mypkg, installed.packages()[,1])
+
+load_or_install<-function(required_packages) {
+  for(package_name in required_packages)  {
+    if(!is_installed(package_name))     {
+       install.packages(package_name)  }
+    library(package_name,character.only=TRUE,quietly=TRUE,verbose=FALSE)
+  }
+}
+
+load_or_install(required_packages)
+  
+  
+##download libraries and test login
+require(readr)
+require(assertthat)
+require(httr)
+loginDHIS2<-function(baseurl,username,password) {
+  url<-paste0(baseurl,"api/me")
+  r<-GET(url,authenticate(username,password))
+  assert_that(r$status_code == 200L) }
+if(loginDHIS2(baseurl,username,password)){
+  print("successfully logged in")
+}else{
+  stop("could not log in! Please check url, username and password")
+}
+
+```
+
+Analysis date `r Sys.Date()` for `r baseurl`
+
+...Pulling the datastore items and responses ...
+
+
+```{r schedule, echo=FALSE, warning=FALSE, include=FALSE}
+options(encoding = "UTF-8")
+
+##pull interaction keys
+require(httr)
+require(jsonlite)
+dataKey_api<-"api/dataStore/actionFeedback/"
+url<-paste0(baseurl,dataKey_api)
+
+keys<-as.data.frame(fromJSON(content(GET(url), "text"), flatten = TRUE), stringsAsFactors=FALSE)
+colnames(keys)<-"id"
+
+
+#for each program ID, pull scheduled events and add to a dataframe
+#first, create an empty dataframe
+interactions<-data.frame()
+e<-c("positive","negative","positiveFeedbackMessages","negativeFeedbackMessage","id")
+for (k in e) interactions[[k]]<-as.character()
+
+url<-paste0(baseurl, "api/dataStore/actionFeedback/",keys$id[1])
+
+for (value in 1:length(keys$id)){
+
+url<-paste0(baseurl, "api/dataStore/actionFeedback/",keys$id[value])
+action<-fromJSON(content(GET(url), "text"))
+
+positive<-action$positive
+negative<-action$negative
+
+if(is.null(unlist(action$positiveFeedbackMessages))){
+    posfeedback<-""}else{
+      posfeedback<-action$positiveFeedbackMessages
+    }
+
+if(is.null(unlist(action$negativeFeedbackMessages))){
+    negfeedback<-""}else{
+      negfeedback<-action$negativeFeedbackMessages
+    }
+negfeedback
+posfeedback
+
+action1<-as.data.frame(cbind(positive,negative,posfeedback,negfeedback,"id"=keys$id[value]),stringsAsFactors=FALSE)
+names(action1)<-e
+
+
+
+if (length(action1)>0){
+  interactions<-rbind(interactions,action1)
+}
+next()
+
+}
+interactions$id<-as.integer(interactions$id)
+
+interactions
+
+
+
+```
+
+
+
+```{r Pull all validation results, echo=FALSE, warning=FALSE, include=FALSE}
+
+#name API
+vresults_api<-"api/validationResults.json?paging=false&fields=id,period,organisationUnit,created,validationRule"
+url<-paste0(baseurl,vresults_api)
+
+
+#pull validation results as data frame
+vresults<-as.data.frame(fromJSON(content(GET(url), "text"), flatten = TRUE), stringsAsFactors=FALSE)
+
+#rename output headers
+x<-sub('validationResults.','', names(vresults))
+x<-sub('.id$','',x)
+names(vresults)<-x
+
+
+```
+
+```{r Merge context data, echo=FALSE, warning=FALSE, include=FALSE}
+
+Sys.setlocale(category = "LC_ALL", locale = "Arabic")
+
+#now pull org units and validationRule IDs
+
+ou_api<-"api/organisationUnits.json?paging=false&fields=id,level,name,parent"
+url<-paste0(baseurl,ou_api)
+
+orgunits<-fromJSON(content(GET(url), "text"), flatten = TRUE)[[1]]
+
+library(dplyr)
+vresults_2<-dplyr::left_join(vresults, orgunits, by=c("organisationUnit"="id"))
+
+parents<-orgunits %>%
+  select(id, name) %>%
+  rename(parent.name = name, parent.id = id)
+
+grandparents<-orgunits %>%
+  select(name, id) %>%
+  rename(grandparentname = name) %>%
+  mutate_at("id",as.character)
+
+
+vresults_2<-left_join(vresults_2, parents, by="parent.id")
+vresults_2<-left_join(vresults_2, grandparents, by=c("parent.id"="id"))
+
+
+## now pulling valRules and instructions
+val_api<-"api/validationRules.json?paging=false&fields=id,code,name,description,instruction"
+url<-paste0(baseurl,val_api)
+valRules<-fromJSON(content(GET(url), "text"), flatten = TRUE)[[1]]
+
+valRules<- valRules %>%
+  rename(valRuleName = name, valRuleCode = code)
+
+
+vresults_2<-left_join(vresults_2, valRules, by=c("validationRule"="id"))
+
+
+```
+
+
+```{r lastly, merge the results with contextual data, echo=FALSE}
+
+outputs<-left_join(vresults_2, interactions, by=c("id"))
+write_excel_csv(outputs, "all_actionItem_responses.csv", append=FALSE)
+
+library(dplyr)
+outputs_sum<- outputs %>%
+  mutate_at(c("negative", "positive"), as.integer) %>%
+  na.omit() %>%
+  group_by(validationRule, valRuleName, instruction) %>%
+  summarise(positive = sum(positive), negative = sum(negative)) %>%
+  arrange(desc(positive, negative)) %>%
+  select(validationRule, valRuleName, instruction, positive, negative)
+
+
+outputs_responses <- outputs %>%
+  group_by(name, valRuleName, instruction) %>%
+  na.omit() %>%
+  arrange(desc(positiveFeedbackMessages, negativeFeedbackMessage, valRuleName)) %>%
+  select(name, valRuleName, instruction, positiveFeedbackMessages, negativeFeedbackMessage)
+
+outputs_byOU <- outputs %>%
+  mutate_at(c("negative", "positive"), as.integer) %>%
+  group_by(grandparentname, parent.name,name) %>%
+  na.omit() %>%
+  summarise(positive = sum(positive), 
+            negative = sum(negative)) %>%
+  select(grandparentname, parent.name,name, positive, negative)
+
+library(dplyr)
+outputs_forchart <- outputs %>%
+  mutate_at(c("negative", "positive"), as.integer) %>%
+  na.omit() %>%
+  group_by(period) %>%
+  summarise(positive = sum(positive), 
+            negative = sum(negative)) %>%
+  select(period, negative, positive)
+
+outputs_forchart$period<-as.Date(paste0(as.character(outputs_forchart$period), '01'), format='%Y%m%d')
+
+
+```
+Pulled `r length(outputs)` responses to action items, available in CSV file of working directory.
+
+Now we output the results in tables...
+
+####Here is a summary of responses to action items
+
+```{r Datatable outputs1, include=TRUE}
+DT::datatable(outputs_sum, 
+              escape = FALSE,
+              extensions = 'Buttons', 
+              options = list(
+                pageLength = 5,
+                dom = 'Blfrtip', 
+                buttons = c('copy', 'csv', 'excel', 'pdf', 'print')))
+
+
+```
+
+####Responses to feedback messages by org unit
+```{r Datatable outputs2, include=TRUE}
+
+DT::datatable(outputs_byOU,
+              escape = FALSE,
+              extensions = 'Buttons', 
+              options = list(
+                pageLength = 5,
+                dom = 'Blfrtip', 
+                buttons = c('copy', 'csv', 'excel', 'pdf', 'print')))
+
+
+```
+
+####Clinics written response to feedback messages
+```{r Datatable outputs3, include=TRUE}
+
+DT::datatable(outputs_responses,
+              escape = FALSE,
+              extensions = 'Buttons', 
+              options = list(
+                pageLength = 5,
+                dom = 'Blfrtip', 
+                buttons = c('copy', 'csv', 'excel', 'pdf', 'print')))
+
+
+```
+
+
+####Chart of responses over time
+```{r over time}
+
+library(ggplot2)
+library(reshape2)
+
+df2<-melt(outputs_forchart, id=c("period"))
+
+
+ggplot(df2, aes(x=period, y=value, group=variable)) +
+        geom_col(position="dodge", aes(fill=variable)) +
+        labs(title="action item feedback delivered by month", ylab="responses") +
+        scale_x_date(date_labels = "%Y%m", date_breaks = "1 month") +
+           geom_text(
+               aes(label = value, y = value + 0.05),
+                   vjust = 0
+           )
+
+
+```
